@@ -2,113 +2,121 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --- CONFIGURACIÓN DE PANTALLA ---
-st.set_page_config(page_title="VariedadesMx - Simulador Pro 2026", layout="wide")
+# --- CONFIGURACIÓN DE INTERFAZ ---
+st.set_page_config(page_title="Ventilador Pro VariedadesMx", layout="wide")
+st.markdown("<style>.stApp {background-color: #050505; color: #00FF41;}</style>", unsafe_allow_html=True)
 
-# Estilo visual de monitor médico
-st.markdown("""
-    <style>
-    .stApp { background-color: #0d0d0d; color: #39FF14; }
-    .stMetric { background-color: #1a1a1a; padding: 10px; border-radius: 5px; border: 1px solid #333; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- FUNCIONES DE CÁLCULO ANTROPOMÉTRICO ---
+def calcular_peso_ideal(talla, sexo):
+    if sexo == "Masculino":
+        return 50 + 0.91 * (talla - 152.4)
+    else:
+        return 45.5 + 0.91 * (talla - 152.4)
 
-# --- MOTOR DE FISIOPATOLOGÍA DINÁMICA ---
-def generar_curvas(pat, vt, fr, peep, fio2, maniobra_reclutamiento=False):
-    # Parámetros base según patología
+# --- MOTOR DE VENTILACIÓN ---
+def simular_ventilacion(modo, pat, vt, fr, peep, fio2, pres_insp, ps, ie_ratio, peso_id):
+    # Parámetros de patología
     params = {
-        "Normal": {"c": 50, "r": 5, "base_gc": 5.0, "pvc": 5},
-        "SDRA (Falla Restrictiva)": {"c": 15, "r": 8, "base_gc": 4.5, "pvc": 10},
-        "Asma/EPOC (Obstructiva)": {"c": 55, "r": 40, "base_gc": 4.8, "pvc": 8},
-        "IAM Derecho (Falla VD)": {"c": 45, "r": 5, "base_gc": 3.5, "pvc": 18},
-        "Edema Pulmonar (ICA)": {"c": 25, "r": 12, "base_gc": 3.8, "pvc": 12}
+        "Normal": {"c": 50, "r": 5, "base_gc": 5.0},
+        "SDRA": {"c": 18, "r": 8, "base_gc": 4.5},
+        "Asma": {"c": 55, "r": 45, "base_gc": 4.8},
+        "IAM Derecho": {"c": 45, "r": 5, "base_gc": 3.2}
     }
-    
     p = params[pat]
     c, r = p["c"], p["r"]
     
-    # Efecto de la maniobra de reclutamiento
-    if maniobra_reclutamiento:
-        c = c * 1.2 # Mejora temporal de compliancia
-    
-    # Cálculos de presiones
-    p_plat = (vt / c) + peep
-    p_pico = p_plat + (r * (vt/1000) * 2) # Basado en flujo
+    # Lógica según Modo Ventilatorio
+    if modo == "AC-Volumen":
+        p_plat = (vt / c) + peep
+        p_pico = p_plat + (r * 0.5)
+        vt_real = vt
+    elif modo == "AC-Presión":
+        p_pico = pres_insp + peep
+        p_plat = p_pico - 2 # Simplificado
+        vt_real = (p_pico - peep) * c
+    else: # PSV (Espontáneo)
+        p_pico = ps + peep
+        p_plat = p_pico - 1
+        vt_real = (ps) * c
+        fr = fr + 4 # Simular esfuerzo del paciente
+
+    # Hemodinamia e Interacción
     p_mean = (p_plat + peep) / 2
+    gc = p["base_gc"] - (peep * 0.1) - (p_mean * 0.05)
+    if pat == "IAM Derecho": gc -= (peep * 0.3)
     
-    # Interacción Hemodinámica Real
-    # En IAM Derecho, el Gasto Cardíaco cae drásticamente con la PEEP
-    if pat == "IAM Derecho (Falla VD)":
-        gc = p["base_gc"] - (peep * 0.25) - (p_mean * 0.1)
-    else:
-        gc = p["base_gc"] - (peep * 0.05) 
-    
-    pam = 60 + (gc * 6)
-    pvc = p["pvc"] + (peep * 0.4)
-    
-    # Gasometría y Oximetría
-    spo2 = min(100, 80 + (fio2 * 15) + (peep * 0.5) - (10 if pat=="SDRA (Falla Restrictiva)" else 0))
-    paco2 = 40 + (p_plat / 4) if pat != "Normal" else 40
-    
-    return p_pico, p_plat, gc, pam, pvc, spo2, paco2, c, r
+    # Gasometría Dinámica
+    ve = (vt_real * fr) / 1000 # Volumen Minuto
+    paco2 = 40 * (8 / ve) # Relación inversa flujo/CO2
+    ph = 7.4 - (0.008 * (paco2 - 40))
+    pao2 = (fio2 * (760 - 47)) - (paco2 / 0.8)
+    spo2 = min(100, 85 + (pao2 / 10))
 
-# --- INTERFAZ ---
-st.title("📟 Simulador de Ventilación Mecánica Avanzada (VariedadesMx)")
+    return p_pico, p_plat, vt_real, round(gc,2), round(ph,2), round(paco2), round(spo2), round(ve,1)
 
+# --- INTERFAZ DE USUARIO ---
+st.title("📟 Estación de Ventilación Mecánica Avanzada")
+
+# Sidebar: Datos del Paciente
 with st.sidebar:
-    st.header("🏥 Perfil del Paciente")
-    escenario = st.selectbox("Patología:", ["Normal", "SDRA (Falla Restrictiva)", "Asma/EPOC (Obstructiva)", "IAM Derecho (Falla VD)", "Edema Pulmonar (ICA)"])
+    st.header("👤 Datos Antropométricos")
+    sexo = st.radio("Sexo:", ["Masculino", "Femenino"])
+    talla = st.number_input("Talla (cm):", 140, 210, 170)
+    edad = st.number_input("Edad:", 18, 99, 45)
+    pi = calcular_peso_ideal(talla, sexo)
+    st.info(f"Peso Ideal: {round(pi, 1)} kg")
     
-    st.header("🎛 Panel de Control")
-    v_t = st.slider("Volumen Corriente (mL)", 200, 800, 450)
-    f_r = st.slider("Frecuencia (bpm)", 8, 40, 16)
-    peep_val = st.slider("PEEP (cmH2O)", 0, 25, 5)
-    fi_o2 = st.slider("FiO2 (%)", 21, 100, 40) / 100
-    
-    st.header("🛠 Maniobras")
-    reclut = st.checkbox("Maniobra de Reclutamiento")
-    fuga = st.checkbox("Test de Fuga de Cuff")
+    st.header("⚙️ Modo y Patología")
+    modo_v = st.selectbox("Modo Ventilatorio:", ["AC-Volumen", "AC-Presión", "PSV (Espontáneo)"])
+    pat_v = st.selectbox("Situación Clínica:", ["Normal", "SDRA", "Asma", "IAM Derecho"])
 
-# Ejecutar motor
-pico, plat, gc, pam, pvc, spo2, co2, comp, res = generar_curvas(escenario, v_t, f_r, peep_val, fi_o2, reclut)
-
-# --- MONITOR DE PARÁMETROS (TIEMPO REAL) ---
-st.subheader("📊 Monitor Multiparamétrico")
+# Panel Central: Parámetros del Ventilador
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("P. PICO", f"{round(pico)} cmH2O", delta="¡ALTA!" if pico > 35 else None, delta_color="inverse")
-c2.metric("P. MESETA", f"{round(plat)} cmH2O", delta="RIESGO" if plat > 30 else None, delta_color="inverse")
-c3.metric("PAM", f"{round(pam)} mmHg", delta="Choque" if pam < 65 else None, delta_color="inverse")
-c4.metric("SpO2", f"{round(spo2)}%", delta="Hipoxia" if spo2 < 90 else None, delta_color="inverse")
+with c1:
+    peep = st.slider("PEEP", 0, 25, 5)
+    fio2 = st.slider("FiO2 (%)", 21, 100, 40) / 100
+with c2:
+    if modo_v == "AC-Volumen":
+        vt = st.slider("Vol. Corriente (mL)", 200, 800, 420)
+        fr = st.slider("Frecuencia (bpm)", 8, 40, 14)
+        pres_insp = 0; ps = 0
+    elif modo_v == "AC-Presión":
+        pres_insp = st.slider("Presión Insp. (cmH2O)", 5, 40, 15)
+        fr = st.slider("Frecuencia (bpm)", 8, 40, 14)
+        vt = 0; ps = 0
+    else: # PSV
+        ps = st.slider("Presión Soporte (PS)", 5, 30, 10)
+        fr = 12 # Basal
+        vt = 0; pres_insp = 0
+with c3:
+    ie = st.select_slider("Relación I:E", options=["1:1", "1:2", "1:3", "1:4"], value="1:2")
 
-c5, c6, c7, c8 = st.columns(4)
-c5.metric("Gasto Cardíaco", f"{round(gc, 2)} L/min")
-c6.metric("PVC", f"{round(pvc)} mmHg")
-c7.metric("Compliancia", f"{round(comp)} mL/cmH2O")
-c8.metric("EtCO2", f"{round(co2)} mmHg")
+# --- EJECUCIÓN ---
+pico, plat, vtr, gc, ph, co2, spo2, ve = simular_ventilacion(modo_v, pat_v, vt, fr, peep, fio2, pres_insp, ps, ie, pi)
 
-# --- GRÁFICAS DINÁMICAS ---
-st.subheader("📈 Curvas de Ventilación")
-t = np.linspace(0, 4, 200)
-# Simular onda de presión real con rampa y meseta
-y = np.piecewise(t, [t < 1, (t >= 1) & (t < 1.3), t >= 1.3], 
-                [lambda x: peep_val + (pico-peep_val)*x, plat, lambda x: peep_val + (plat-peep_val)*np.exp(-5*(x-1.3))])
+# --- MONITOR UCIN ---
+st.divider()
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("P. PICO", f"{round(pico)}")
+m2.metric("P. MESETA", f"{round(plat)}")
+m3.metric("Vt Real", f"{round(vtr)} mL", f"{round(vtr/pi, 1)} mL/kg PI")
+m4.metric("Vol. Minuto", f"{ve} L/min")
 
-fig, ax = plt.subplots(figsize=(12, 3))
-ax.plot(t, y, color='#39FF14', linewidth=3)
+# --- LABORATORIO DE GASES (RESULTADOS) ---
+st.subheader("🩸 Resultados de Gasometría Arterial")
+g1, g2, g3, g4 = st.columns(4)
+g1.metric("pH", ph)
+g2.metric("pCO2", f"{co2} mmHg")
+g3.metric("SpO2", f"{spo2}%")
+g4.metric("Gasto Cardíaco", f"{gc} L/min")
+
+# --- GRÁFICAS ---
+st.subheader("📈 Curvas en Tiempo Real")
+t = np.linspace(0, 4, 100)
+y = np.piecewise(t, [t < 1, (t >= 1) & (t < 1.4), t >= 1.4], 
+                [lambda x: peep + (pico-peep)*x, plat, lambda x: peep + (plat-peep)*np.exp(-4*(x-1.4))])
+fig, ax = plt.subplots(figsize=(10, 2))
+ax.plot(t, y, color='#00FF41', linewidth=2.5)
 ax.set_facecolor('black')
 fig.patch.set_facecolor('black')
-ax.set_ylabel("Presión")
-ax.grid(color='#333', linestyle='--')
 st.pyplot(fig)
-
-# --- REPORTE SISTÉMICO ---
-st.subheader("🩺 Evaluación Extrapulmonar")
-with st.expander("Ver detalle de Perfusión Orgánica"):
-    col_a, col_b = st.columns(2)
-    col_a.write(f"🧠 **Perfusión Cerebral:** {'Comprometida' if (pam - co2/2) < 50 else 'Estable'}")
-    col_a.write(f"💧 **Perfusión Renal:** {'Riesgo de falla prerenal' if gc < 3.0 else 'Flujo adecuado'}")
-    col_b.write(f"❤️ **Carga del VD:** {'Sobrecarga crítica' if pvc > 15 else 'Normal'}")
-    col_b.write(f"📋 **Índice Tobin (RSBI):** {round(f_r / (v_t/1000), 1)}")
-
-if fuga:
-    st.warning("⚠️ Test de Fuga: Volumen exhalado 150mL menor al inspirado. Riesgo de edema laríngeo bajo.")
